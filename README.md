@@ -60,8 +60,8 @@ python studies/my_signal.py
 revenue_yoy / inst_buy`(全 point-in-time)。內建範例:`studies/example_momentum.py`、
 `studies/example_revenue_combo.py`。
 
-資料:本機已有 tw-stock-bot 免設定(config 預設指 `../tw-stock-bot/cache`);
-否則 `export QLAB_DATA_DIR=/path/to/cache` 或用 `backfill/` 自抓(見 data/README.md)。
+資料:用 `backfill/` 拿自己的 FinMind token 自抓進 `data/`(預設目錄),
+或 `export QLAB_DATA_DIR=/path/to/cache` 指向已有資料(見 data/README.md)。
 純標準庫,只有 `backfill/` 需 `requests`。Python 3.10+。
 
 ## Case study:營收 surprise(2021-24 神 / 2025 破)
