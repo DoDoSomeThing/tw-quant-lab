@@ -2,20 +2,19 @@
 """
 全域設定。資料路徑、成本、基準、樣本外切點都集中在這。
 
-資料策略:預設指向 tw-stock-bot 的 cache(資料只放一份,不複製、不進 git)。
-公開版讓使用者用自己的 FinMind token 跑 backfill/ 把資料抓進 data/。
-全部可用環境變數覆蓋:
-  QLAB_DATA_DIR  kline_deep.json / revenue.json 所在目錄
-  QLAB_T86_DIR   法人買賣超(t86)逐日 json 目錄
+資料策略:資料不進 git。用自己的 FinMind token 跑 backfill/ 把資料抓進 data/,
+或用環境變數指向已有資料目錄:
+  QLAB_DATA_DIR  kline_deep.json / revenue.json 所在目錄(預設 ./data)
+  QLAB_T86_DIR   法人買賣超(t86)逐日 json 目錄(預設 ./data/t86_cache)
 """
 import os
 
 # repo 根目錄(framework/ 的上一層)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 預設資料源:同層的 tw-stock-bot/cache(不複製,單一真相)。
-_DEFAULT_DATA = os.path.normpath(os.path.join(ROOT, "..", "tw-stock-bot", "cache"))
-_DEFAULT_T86 = os.path.normpath(os.path.join(ROOT, "..", "tw-stock-bot", "t86_cache"))
+# 預設資料目錄:repo 內的 data/(不進 git;backfill 寫這、或用 env 指向他處)。
+_DEFAULT_DATA = os.path.join(ROOT, "data")
+_DEFAULT_T86 = os.path.join(ROOT, "data", "t86_cache")
 
 DATA_DIR = os.environ.get("QLAB_DATA_DIR", _DEFAULT_DATA)
 T86_DIR = os.environ.get("QLAB_T86_DIR", _DEFAULT_T86)
