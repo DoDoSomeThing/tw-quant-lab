@@ -1,0 +1,17 @@
+# 資料不進 git(80MB+,走 GitHub release / 自行 backfill)
+data/
+*.json
+!framework/**/*.json
+cache/
+t86_cache/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 結果輸出
+results/*.csv
+results/*.txt
+!results/.gitkeep
