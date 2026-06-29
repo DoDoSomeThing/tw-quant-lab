@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-精簡資料抓取工具(自帶,不依賴 tw-stock-bot)。
+精簡資料抓取工具(自帶,零外部專案依賴)。
 backfill/ 用這支拿 logger / 帶重試的 http_get / 上市股票清單。
 FinMind token 一律走環境變數 FINMIND_TOKEN(不寫死)。
 """
