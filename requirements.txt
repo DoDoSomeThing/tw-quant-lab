@@ -1,0 +1,3 @@
+# 核心 framework + studies 只用標準庫,無需安裝任何東西。
+# 只有 backfill/(用自己的 FinMind token 抓資料)需要:
+requests>=2.28
