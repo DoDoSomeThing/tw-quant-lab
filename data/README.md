@@ -21,6 +21,15 @@ export QLAB_DATA_DIR=/path/to/cache        # kline_deep.json / revenue.json
 export QLAB_T86_DIR=/path/to/t86_cache     # 法人逐日 json(選用)
 ```
 
+## 保持最新
+
+```bash
+python backfill/update_data.py --check     # 只檢測新不新鮮(免 token)
+export FINMIND_TOKEN=你的token
+python backfill/update_data.py             # 過期才增量補到今天(kline 接新日、revenue 補新月)
+```
+增量只補現有股票缺的部分,比全量 backfill 快。新上市股票要全量時另跑 backfill_kline.py。
+
 ## 資料格式
 - `kline_deep.json` = `{sid: [{date, open, close, max, min, volume}, ...]}`
 - `revenue.json` = `{sid: [[avail_date, yyyymm, rev], ...]}`
