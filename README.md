@@ -24,23 +24,45 @@
 framework/
   config.py     路徑(env 覆蓋,預設指向資料源)、成本、基準、OOS 切點
   data.py       Data:一次載入 kline/revenue/t86 → cal/regime/等權基準
-  gates.py      五關引擎:報告 / bootstrap / 隨機對照 / regime 污染警示
-studies/        各訊號(動能/低波/爆量/營收…)= 套五關
+  context.py    Context:傳給訊號函式的 point-in-time 查詢(close/動能/MA/YoY/法人)
+  engine.py     validate():吃訊號函式 → 自動跑完五關出報告
+  gates.py      五關零件:報告 / bootstrap / 隨機對照 / regime 污染警示
+  finmind.py    自帶資料抓取工具(脫離 bot)
+studies/        各訊號 = 套五關(含 example_* 通用介面範例)
+backfill/       FinMind 回填(kline/revenue/t86),token 走 env
 results/        CSV + 每 study 一句結論
 data/           不進 git;config 指向(見 data/README.md)
 ```
 
-## 快速開始
+## 快速開始 —— 寫一個訊號,自動跑五關
+
+只寫一個函式,框架包辦驗證:
+
+```python
+# studies/my_signal.py
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from framework.engine import validate
+
+def signal(sid, date, ctx):
+    """回傳當日訊號分數(None=不選);分數越大越優先。ctx 只給到 date 為止的資料,不偷看未來。"""
+    return ctx.momentum(sid, date, lookback=252, gap=21)   # 12-1 動能
+
+validate(signal, "我的訊號")
+```
 
 ```bash
-# 本機已有 tw-stock-bot → 免設定(config 預設指向 ../tw-stock-bot/cache)
-python studies/revenue_stress.py
-python studies/factor_scan.py
-
-# 資料在別處
-export QLAB_DATA_DIR=/path/to/cache
+python studies/my_signal.py
+# → 自動印 關1 公平基準 / 關2 真OOS(2024+2025) / 關3 隨機對照 / 關4 成本敏感 / 關5 regime污染
 ```
-純標準庫,無第三方依賴。Python 3.10+。
+
+`ctx` 提供:`close / window / momentum / ma / volatility / regime / avgvol / size_pct /
+revenue_yoy / inst_buy`(全 point-in-time)。內建範例:`studies/example_momentum.py`、
+`studies/example_revenue_combo.py`。
+
+資料:本機已有 tw-stock-bot 免設定(config 預設指 `../tw-stock-bot/cache`);
+否則 `export QLAB_DATA_DIR=/path/to/cache` 或用 `backfill/` 自抓(見 data/README.md)。
+純標準庫,只有 `backfill/` 需 `requests`。Python 3.10+。
 
 ## Case study:營收 surprise(2021-24 神 / 2025 破)
 
@@ -69,5 +91,6 @@ YoY> 20% (n=2131):  20日[+1.18/43%/-2.33]  40日[+2.37/44%/-2.22]  60日[+3.61/
 
 ## 狀態
 
-- 階段1(內部乾淨版,**現況**):4 支 study 跑得出全部結論,bot 不受影響,資料不重複。
-- 階段2(規劃中):通用訊號介面 `signal(sid, date, ctx)->float|None` + backfill/(自帶 FinMind token)+ 公開。
+- 階段1 ✅:framework 五關零件 + 4 支原始 study(factor_scan / revenue_offline_bt / revenue_refine / revenue_stress),跑得出全部結論,bot 不受影響,資料不重複。
+- 階段2 ✅:通用訊號介面 `signal(sid, date, ctx)->float|None` + `validate()` 自動五關引擎 + `backfill/`(自帶 FinMind token,脫離 bot)+ 範例 study。
+- 別人 clone → 抓資料 → 寫一個 signal 函式,就能得到五關報告。
