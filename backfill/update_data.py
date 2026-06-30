@@ -52,14 +52,21 @@ def _secs_to_next_hour():
 
 
 # ---------- 新鮮度檢測 ----------
+KLINE_STALE_FRAC = 0.10   # 落後股票超過此比例 → 判過期(容許少數已下市/停牌的永久舊資料)
+
+
 def kline_status(deep):
-    """回 (stale, last_date, target_date)。"""
-    last = ""
-    for bars in deep.values():
-        if bars and bars[-1]["date"] > last:
-            last = bars[-1]["date"]
+    """
+    回 (stale, max_date, target_date, behind, total)。
+    不只看最大日期(會被單檔矇騙),改看「落後 target 的股票比例」。
+    """
     target = last_weekday(date.today() - timedelta(days=KLINE_GRACE_DAYS)).isoformat()
-    return (last < target if last else True), last or "(空)", target
+    lasts = [bars[-1]["date"] for bars in deep.values() if bars]
+    total = len(lasts)
+    mx = max(lasts) if lasts else "(空)"
+    behind = sum(1 for d in lasts if d < target)
+    stale = (behind / total > KLINE_STALE_FRAC) if total else True
+    return stale, mx, target, behind, total
 
 
 def revenue_status(rev):
@@ -203,12 +210,13 @@ def main():
     deep = json.load(open(kp, encoding="utf-8"))
     rev = json.load(open(rp, encoding="utf-8"))
 
-    k_stale, k_last, k_target = kline_status(deep)
+    k_stale, k_max, k_target, k_behind, k_total = kline_status(deep)
     r_stale, r_latest, r_expected = revenue_status(rev)
 
     print("=" * 64)
     print(f"資料家:{config.DATA_DIR}")
-    print(f"kline   最後 {k_last}  應到 {k_target}  → {'⚠️ 過期' if k_stale else '✅ 最新'}")
+    print(f"kline   最新 {k_max}  應到 {k_target}  落後 {k_behind}/{k_total} 檔"
+          f"  → {'⚠️ 過期' if k_stale else '✅ 最新'}")
     print(f"revenue 最新 {r_latest}  應到 {r_expected}  → {'⚠️ 過期' if r_stale else '✅ 最新'}")
     print("=" * 64)
 
