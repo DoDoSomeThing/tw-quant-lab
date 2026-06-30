@@ -233,7 +233,7 @@ def main():
         return
 
     if do_k:
-        logger.info(f"kline 增量更新({k_last} → 今天)…")
+        logger.info(f"kline 增量更新(落後 {k_behind} 檔 → 補到今天)…")
         update_kline(deep, kp)
     if do_r:
         logger.info("revenue 增量更新(補新月份)…")
