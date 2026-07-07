@@ -89,8 +89,35 @@ YoY> 20% (n=2131):  20日[+1.18/43%/-2.33]  40日[+2.37/44%/-2.22]  60日[+3.61/
 
 這就是重點:**漂亮的回測 + 樣本外一翻就破 = 幻覺**。誠實驗證器讓它當場現形。
 
+## 已知限制(誠實驗證器自己也得誠實)
+
+1. **倖存者偏差**:universe 來自「現在還上市」的股票清單(`get_tse_stock_list`),
+   回測期間下市/全額交割的股票不在樣本 → 所有結論**系統性偏樂觀**。
+   台股每年下市檔數佔比不高,但方向明確:帳面 edge 打個折看,「無 edge」的結論反而更可信。
+2. **成本是線性估算**:0.6% 來回(關4 掃 0.4%~0.8%),沒有模擬滑價、漲跌停買不到、流動性衝擊。
+   小型股實際成本更高 → 又是偏樂觀方向。
+3. **樣本期 regime 污染**:台股 2021-25 幾乎無正常年(關5 會自動警示),
+   在這段驗出的任何結論外推性都有限。
+4. **資料品質依賴 FinMind**:除權息還原、缺漏日都繼承上游;kline 有 sanity 但非逐筆核對。
+
+## 測試(驗證「驗證器本身」)
+
+框架若有 bug,所有「訊號無效」的結論本身就不可信。`tests/` 用**合成的已知答案宇宙**測框架:
+
+| 測試 | 已知答案 | 框架必須 |
+|---|---|---|
+| 植入真 edge(贏家股 +0.2%/日) | 有 edge | 驗出顯著正超額(抓得到真訊號) |
+| 純亂數訊號 | 無 edge | 超額貼近 0(不產生幻覺) |
+| CHEAT 偷看未來 20 日 | 作弊必賺 | 超額爆高(報酬計算沒壞);真 study 若逼近 CHEAT 等級 → 先懷疑 lookahead |
+| point-in-time 查詢 | — | window/momentum/revenue 絕不含未來資料 |
+
+```bash
+python -m unittest discover -s tests    # 純合成資料,不需 token 不碰網路
+```
+
 ## 狀態
 
 - 階段1 ✅:framework 五關零件 + 4 支原始 study(factor_scan / revenue_offline_bt / revenue_refine / revenue_stress),跑得出全部結論,bot 不受影響,資料不重複。
 - 階段2 ✅:通用訊號介面 `signal(sid, date, ctx)->float|None` + `validate()` 自動五關引擎 + `backfill/`(自帶 FinMind token,脫離 bot)+ 範例 study。
+- 階段3 ✅(2026-07-07):`tests/` 合成宇宙測試(植入edge/亂訊號/CHEAT/point-in-time)+ CI(push 自動跑)+ 已知限制聲明 + RNG 改 local seed(結果與 study 執行順序無關)。
 - 別人 clone → 抓資料 → 寫一個 signal 函式,就能得到五關報告。

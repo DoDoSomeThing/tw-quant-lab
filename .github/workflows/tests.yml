@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 測試全用合成資料,不需要 FinMind token 也不碰網路
+      - name: 跑測試(驗證「驗證器本身」)
+        run: python -m unittest discover -s tests -v

@@ -16,7 +16,8 @@ import statistics
 from framework import config
 from framework.data import yr
 
-random.seed(42)
+# 不用全域 seed：同一進程跑多個 study 時,全域 RNG 狀態會讓結果依「呼叫順序」而變。
+# 每個需要隨機的函式各自建 local Random(seed) → 同輸入永遠同輸出,順序無關。
 
 
 # ============ 關 1+2+5:超額報酬分層報告 ============
@@ -62,15 +63,16 @@ def report(name, pairs, monthly=False, oos_from=None, oos2=False, indent="  "):
 
 
 # ============ 關 3:隨機對照 + bootstrap ============
-def bootstrap(xs, n=5000):
-    """回 (mean, ci_lo, ci_hi, p_two_sided)。純 python,無 scipy。"""
+def bootstrap(xs, n=5000, seed=42):
+    """回 (mean, ci_lo, ci_hi, p_two_sided)。純 python,無 scipy。local seed=可重現且與呼叫順序無關。"""
     if not xs:
         return None
+    rng = random.Random(seed)
     m = statistics.mean(xs)
     N = len(xs)
     means = []
     for _ in range(n):
-        s = sum(xs[random.randrange(N)] for _ in range(N)) / N
+        s = sum(xs[rng.randrange(N)] for _ in range(N)) / N
         means.append(s)
     means.sort()
     lo = means[int(0.025 * n)]

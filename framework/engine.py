@@ -23,8 +23,6 @@ from framework.data import Data, load_revenue, load_t86
 from framework.context import Context
 from framework import gates
 
-random.seed(42)
-
 
 def run(signal, data, ctx, hold=20, rebalance=21, top_pct=0.10,
         min_pick=5, pick_top=True, regime_gate=False, cost=config.COST, warmup=252):
@@ -32,6 +30,9 @@ def run(signal, data, ctx, hold=20, rebalance=21, top_pct=0.10,
     回 (pairs, perdate)。
       pairs   = [(date, 超額)]  每個再平衡日一筆
       perdate = [(date, [全市場 fwd 報酬...], k, ew)]  供隨機對照從全市場重抽
+
+    註:hold=20 / rebalance=21 刻意錯位 1 日 —— 持有期結束到下次進場留一個
+    交易日空窗,模擬「收盤出場、隔日重新選股」,避免同日出入場的假設。
     """
     EW = data.build_ew(hold)
     cal, C, bench = data.cal, data.C, data.bench
@@ -99,12 +100,13 @@ def validate(signal, name="訊號", data=None, hold=20, rebalance=21, top_pct=0.
     gates.report(name, pairs, monthly=True, oos2=True)
 
     print("\n關3 隨機對照(同條件亂選)")
+    rng = random.Random(42)   # local seed:結果可重現且不受其他 study 影響
 
     def draw():
         out = []
         for dt, rets, k, ew in perdate:
             if len(rets) >= k:
-                samp = random.sample(rets, k)
+                samp = rng.sample(rets, k)
                 out.append((statistics.mean(samp) - cost) - ew)
         return out
 
