@@ -30,7 +30,7 @@ def _secs_to_next_hour():
 
 def fetch_deep(sid, start, end):
     try:
-        j = http_get(FINMIND_API, params={"dataset": "TaiwanStockPrice", "data_id": sid,
+        j = http_get(FINMIND_API, params={"dataset": config.PRICE_DATASET, "data_id": sid,
                      "start_date": start, "end_date": end, "token": FINMIND_TOKEN}, timeout=40).json()
     except Exception as e:
         logger.warning(f"{sid} 例外:{e}")
@@ -67,7 +67,8 @@ def main():
         except Exception:
             deep = {}
     codes = [c for c in get_tse_stock_list() if c.isdigit() and len(c) == 4]
-    logger.info(f"目標 {len(codes)} 檔  區間 {args.start}~{args.end}")
+    logger.info(f"目標 {len(codes)} 檔  區間 {args.start}~{args.end}"
+                f"  資料集 {config.PRICE_DATASET}({config.PRICE_MODE}) → {args.out}")
 
     def save():
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

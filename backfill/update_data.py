@@ -86,7 +86,7 @@ def revenue_status(rev):
 # ---------- 抓取 ----------
 def fetch_kline(sid, start, end):
     try:
-        j = http_get(FINMIND_API, params={"dataset": "TaiwanStockPrice", "data_id": sid,
+        j = http_get(FINMIND_API, params={"dataset": config.PRICE_DATASET, "data_id": sid,
                      "start_date": start, "end_date": end, "token": FINMIND_TOKEN}, timeout=40).json()
     except Exception:
         return [], "fail"
@@ -214,7 +214,7 @@ def main():
     r_stale, r_latest, r_expected = revenue_status(rev)
 
     print("=" * 64)
-    print(f"資料家:{config.DATA_DIR}")
+    print(f"資料家:{config.DATA_DIR}  價格模式:{config.PRICE_MODE}({config.PRICE_DATASET})")
     print(f"kline   最新 {k_max}  應到 {k_target}  落後 {k_behind}/{k_total} 檔"
           f"  → {'⚠️ 過期' if k_stale else '✅ 最新'}")
     print(f"revenue 最新 {r_latest}  應到 {r_expected}  → {'⚠️ 過期' if r_stale else '✅ 最新'}")
