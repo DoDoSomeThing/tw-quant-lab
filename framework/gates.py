@@ -58,6 +58,13 @@ def report(name, pairs, monthly=False, oos_from=None, oos2=False, indent="  "):
     if iss and oos:
         print(f"{indent}   IS(<{cut[:4]})均={statistics.mean(iss)*100:+.2f}%"
               f"  OOS(>={cut[:4]})均={statistics.mean(oos)*100:+.2f}%")
+    elif not oos:
+        last = max(dt for dt, _ in pairs)
+        print(f"{indent}   🚨 OOS 空轉:切點 {cut} 之後無樣本(資料尾 {last})"
+              f"— 樣本外這關**沒有生效**,先 update_data 補資料再信結論。")
+    else:
+        first = min(dt for dt, _ in pairs)
+        print(f"{indent}   🚨 IS 空:切點 {cut} 之前無樣本(資料頭 {first})— IS/OOS 比較未生效。")
     print(f"{indent}   分年: " +
           "  ".join(f"{y}:{statistics.mean(v)*100:+.1f}%(n{len(v)})" for y, v in sorted(by.items())))
 
@@ -127,6 +134,51 @@ def random_control(real_vals, draw_random, trials=300, indent="  "):
           f"中位 {statistics.median(rand_means)*100:+.2f}%")
     print(f"{indent}隨機 >= 你的 = {better:.1%}(經驗 p 值;>5% = 贏不過亂選)")
     return better
+
+
+# ============ 關 6:參數穩健性(sweep) ============
+def sweep_report(cells, indent="  ", pos_need=0.8):
+    """
+    cells = [(label, pairs)]。每格印 n/超額均/勝率,最後判:
+    正格比例 >= pos_need 且沒有災難格(均值 < -1%/期)才過。
+    防「只有一組參數神」的過擬合。回 (frac_pos, worst_mean)。
+    """
+    means = []
+    for label, pairs in cells:
+        vals = [v for _, v in pairs if v is not None]
+        n, m, pos = stats(vals)
+        means.append(m)
+        print(f"{indent}{label}: n={n} 超額均={m*100:+.2f}% 勝率={pos:.0f}%")
+    if not means:
+        print(f"{indent}無資料")
+        return 0.0, 0.0
+    frac = sum(1 for m in means if m > 0) / len(means)
+    worst = min(means)
+    ok = frac >= pos_need and worst > -0.01
+    print(f"{indent}→ 正格 {frac:.0%}(門檻 {pos_need:.0%})  最差格 {worst*100:+.2f}%  "
+          f"{'🟢 一片正,穩健' if ok else '🔴 有參數懸崖,疑過擬合'}")
+    return frac, worst
+
+
+# ============ 關 7:子期間穩健性(滾動窗) ============
+def subperiod(pairs, window=12, pos_need=0.65, indent="  "):
+    """
+    滾動 window 期(月再平衡≈12個月)窗的超額均值序列。
+    防「單一年/單一段撐起全場」。判:正窗比例 >= pos_need 且最差窗均 > -2%/期。
+    回 (frac_pos, worst_mean);樣本不足回 None。
+    """
+    vals = [v for _, v in pairs if v is not None]
+    if len(vals) < window + 4:
+        print(f"{indent}樣本 {len(vals)} 期不足(需 {window+4}+),此關跳過")
+        return None
+    wins = [statistics.mean(vals[i:i + window]) for i in range(len(vals) - window + 1)]
+    frac = sum(1 for w in wins if w > 0) / len(wins)
+    worst, best = min(wins), max(wins)
+    ok = frac >= pos_need and worst > -0.02
+    print(f"{indent}滾動{window}期窗 {len(wins)} 個:正窗 {frac:.0%}(門檻 {pos_need:.0%})  "
+          f"最差 {worst*100:+.2f}%/期  最佳 {best*100:+.2f}%/期  "
+          f"{'🟢 各段都站得住' if ok else '🔴 靠單段撐盤'}")
+    return frac, worst
 
 
 # ============ 關 5:regime 污染警示 ============

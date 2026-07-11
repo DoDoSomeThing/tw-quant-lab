@@ -33,7 +33,6 @@ import json
 import math
 import random
 import statistics
-import datetime as dt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
@@ -458,7 +457,7 @@ def write_md(dates, results):
     L = []
     L.append("# 宏觀 Regime 訊號驗證框架 — 成績單 2026-07-01\n")
     L.append(f"基準資產 **^TWII(台股加權)** {dates[0]}~{dates[-1]} n={len(dates)}。")
-    L.append(f"倉位輸出 0/0.5/1(空手/半倉/滿倉),測「照訊號調倉 vs 一直滿倉(buy&hold)」。")
+    L.append("倉位輸出 0/0.5/1(空手/半倉/滿倉),測「照訊號調倉 vs 一直滿倉(buy&hold)」。")
     L.append(f"成本來回 {BASE_COST*100:.1f}%(0050 ETF 實際,關4 另測 {[int(c*10000) for c in COST_GRID]}bp)。")
     L.append("對照:**CHEAT**(偷看隔日漲跌=機制上限,應大幅贏)、**RANDOM**(同平均曝險、同換手率亂調 40 種子平均=下限,訊號要贏它才算真擇時)。\n")
 
@@ -496,7 +495,7 @@ def write_md(dates, results):
     watch = [r["name"] for r in results if r["verdict"].startswith("⚠️")]
     drop = [r["name"] for r in results if r["verdict"].startswith("❌")]
     L.append("\n## 結論")
-    L.append(f"- ◾ **基準**:S0 V3 黃金交叉 — 大砍 MDD 但拿 Sharpe 換,新訊號的比較對象。")
+    L.append("- ◾ **基準**:S0 V3 黃金交叉 — 大砍 MDD 但拿 Sharpe 換,新訊號的比較對象。")
     L.append(f"- ✅ **留**({len(keep)}):{', '.join(keep) or '無'}")
     L.append(f"- ⚠️ **待觀察**({len(watch)}):{', '.join(watch) or '無'}")
     L.append(f"- ❌ **丟**({len(drop)}):{', '.join(drop) or '無'}")
