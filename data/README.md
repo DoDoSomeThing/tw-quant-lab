@@ -21,6 +21,14 @@ export QLAB_DATA_DIR=/path/to/cache        # kline_deep.json / revenue.json
 export QLAB_T86_DIR=/path/to/t86_cache     # 法人逐日 json(選用)
 ```
 
+**價格模式(選用)— 還原價**
+```bash
+export QLAB_PRICE=adj    # backfill/update/engine 全管線切 TaiwanStockPriceAdj
+                         # 檔名自動變 kline_deep_adj.json,與 raw 並存不互污
+```
+預設 raw(原始價)。原始價有分割假跳動 + 除息假跌 → **驗高殖利率/存股型訊號必用 adj**
+(詳見主 README「已知限制」#4)。
+
 ## 保持最新
 
 ```bash
