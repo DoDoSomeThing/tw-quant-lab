@@ -31,7 +31,8 @@ from framework import config
 from framework.data import Data, load_revenue
 from framework.context import Context
 
-LOG_PATH = os.path.join(config.DATA_DIR, "paper_log.json")
+# log 路徑可用 QLAB_PAPER_LOG 覆寫(tw-stock-bot v2 把正本放它的 repo 追蹤)
+LOG_PATH = os.environ.get("QLAB_PAPER_LOG") or os.path.join(config.DATA_DIR, "paper_log.json")
 HOLD, GAP, COST = 20, 21, config.COST
 YOY_TH, MA_N, MOM_N, SIZE_P = 0.20, 60, 60, 0.5   # 鎖死。要改=重跑七關,不是改這裡。
 

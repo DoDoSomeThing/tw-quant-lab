@@ -137,6 +137,9 @@ def _cum_factors(bars, factors):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report", action="store_true", help="只印殘餘異常,不抓不寫")
+    ap.add_argument("--refresh-div", action="store_true",
+                    help="除權息全檔強制重抓(快取只會累積不會過期;定期跑才拿得到新除息,"
+                         "除息季尤要。分割/減資漏抓的由 fallback 跳動比值兜底)")
     args = ap.parse_args()
 
     deep = json.load(open(RAW_PATH, encoding="utf-8"))
@@ -150,7 +153,10 @@ def main():
         if not FINMIND_TOKEN:
             logger.error("無 FINMIND_TOKEN。")
             return
-        # 第 1 波:全檔除權息
+        # 第 1 波:全檔除權息(--refresh-div 時清掉舊快取強制重抓)
+        if args.refresh_div:
+            for s in list(events):
+                events[s].pop(DIV, None)
         fetch_all(deep, events, {s: [DIV] for s in deep}, start)
 
         # 第 2 波:除權息修正後仍有殘餘跳動的 → 拉分割+減資
