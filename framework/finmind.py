@@ -44,7 +44,11 @@ def http_get(url, *, timeout=15, retries=3, backoff=3, **kwargs):
 
 
 def get_tse_stock_list():
-    """上市股票清單 {code: name}(TWSE 公司基本資料,含 ETF)。"""
+    """
+    上市股票清單 {code: name}。
+    兩個來源合併 —— t187ap03_L 是**公司**基本資料,**不含 ETF**(0050/0056 等會漏掉,
+    基準抓不到就整個回測跑不起來),所以再用 STOCK_DAY_ALL(當日全部交易標的)補齊。
+    """
     stocks = {}
     try:
         for s in http_get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=15).json():
@@ -53,5 +57,14 @@ def get_tse_stock_list():
             if code and name:
                 stocks[code] = name
     except Exception as e:
-        _log.warning(f"抓股票清單失敗:{e}")
+        _log.warning(f"抓公司基本資料失敗:{e}")
+    try:
+        for s in http_get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL",
+                          timeout=15).json():
+            code = (s.get("Code") or "").strip()
+            name = (s.get("Name") or "").strip()
+            if code and name:
+                stocks.setdefault(code, name)
+    except Exception as e:
+        _log.warning(f"抓當日交易清單失敗:{e}")
     return stocks
