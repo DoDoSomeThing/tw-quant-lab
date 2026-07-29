@@ -18,6 +18,36 @@ def yr(dt):
     return dt[:4]
 
 
+# 台股單日漲跌幅限制 ±10% → 收盤對收盤跳動 >15% 一定是公司行為
+# (分割 / 反分割 / 大額除權息),不可能是正常交易。用來偵測需還原的斷點。
+SPLIT_GAP = 0.15
+
+
+def adjust_splits(bars):
+    """
+    後復權:把分割/大除息造成的價格斷點抹平(最新價=實際價,歷史價往回等比縮放)。
+    就地修改 open/close/max/min;volume 反向縮放(分割後股數變多)。回傳調整過幾個斷點。
+    不處理 <15% 的小額除息(對布林/報酬影響可忽略)。
+    """
+    n = len(bars)
+    adjusted = 0
+    for i in range(1, n):
+        p0 = bars[i - 1]["close"]
+        p1 = bars[i]["close"]
+        if not p0 or p0 <= 0 or not p1:
+            continue
+        r = p1 / p0
+        if r < (1 - SPLIT_GAP) or r > (1 + SPLIT_GAP):
+            for j in range(i):                       # 之前所有 bar 等比縮放
+                for k in ("open", "close", "max", "min"):
+                    if bars[j].get(k):
+                        bars[j][k] *= r
+                if bars[j].get("volume"):
+                    bars[j]["volume"] /= r
+            adjusted += 1
+    return adjusted
+
+
 class Data:
     """
     一次載入,衍生全部共用結構。
@@ -42,6 +72,9 @@ class Data:
 
         if self.bench not in self.d:
             raise SystemExit(f"基準 {self.bench} 不在資料裡。")
+
+        # 後復權:抹平分割/大除息斷點(否則布林/報酬/regime 全被污染)
+        self.split_adjusted = sum(adjust_splits(bars) for bars in self.d.values())
 
         self.cal = [b["date"] for b in self.d[self.bench]]
         self.cidx = {dt: i for i, dt in enumerate(self.cal)}
