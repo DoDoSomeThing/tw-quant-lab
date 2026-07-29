@@ -27,141 +27,241 @@ RNG = np.random.default_rng(42)
 
 
 # ============ 面板:一次算好所有特徵 + 前向報酬 ============
+def _aligned(bars, cal_idx, n, key):
+    """把某檔的 bar 欄位對齊主日曆,缺值 = nan。"""
+    a = np.full(n, np.nan)
+    for b in bars:
+        k = cal_idx.get(b["date"])
+        if k is not None:
+            v = b.get(key)
+            if v:
+                a[k] = v
+    return a
+
+
+def _stock_features(close, high, low, vol):
+    """
+    單檔的全部 point-in-time 特徵(pandas rolling,只用當下與過去)。
+    回 {名稱: 陣列}(與輸入等長,不足期間 = nan)。
+    """
+    import pandas as pd
+    c = pd.Series(close)
+    h = pd.Series(high)
+    lo = pd.Series(low)
+    v = pd.Series(vol)
+
+    out = {}
+    # 動能(跳過最近 gap 的版本另計)
+    for lb in (20, 60, 120, 252):
+        out[f"mom{lb}"] = (c / c.shift(lb) - 1).to_numpy()
+    # 均線乖離(價/MA)
+    for n in (20, 60, 120):
+        out[f"px_ma{n}"] = (c / c.rolling(n, min_periods=int(n * 0.8)).mean()).to_numpy()
+    # 波動(60日日報酬標準差)
+    out["vol60"] = (c.pct_change(fill_method=None)
+                    .rolling(60, min_periods=48).std(ddof=0).to_numpy())
+    # KD(9,3,3):K = RSV 的 1/3 指數平滑,D = K 的 1/3 指數平滑
+    llv = lo.rolling(9, min_periods=9).min()
+    hhv = h.rolling(9, min_periods=9).max()
+    rsv = ((c - llv) / (hhv - llv) * 100).replace([np.inf, -np.inf], np.nan).fillna(50)
+    K = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+    D = K.ewm(alpha=1 / 3, adjust=False).mean()
+    out["kd_k"] = K.to_numpy()
+    out["kd_gold"] = ((K > D) & (K.shift(1) <= D.shift(1))).astype(float).to_numpy()
+    # RSI(14, Wilder)
+    diff = c.diff()
+    up = diff.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    dn = (-diff.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    out["rsi14"] = (100 - 100 / (1 + up / dn.replace(0, np.nan))).to_numpy()
+    # 量能:近5日均量 / 近60日均量
+    out["volratio"] = (v.rolling(5, min_periods=4).mean()
+                       / v.rolling(60, min_periods=40).mean()).to_numpy()
+    # 52週位置:0=一年最低、1=一年最高
+    mn = c.rolling(252, min_periods=200).min()
+    mx = c.rolling(252, min_periods=200).max()
+    out["pos52"] = ((c - mn) / (mx - mn)).replace([np.inf, -np.inf], np.nan).to_numpy()
+    return out
+
+
+def _inst_series(inst_map, cal, sid):
+    """法人:當日淨買(投信或外資>0)與「連續淨買天數」。回 (buy, streak) 陣列。"""
+    n = len(cal)
+    buy = np.zeros(n)
+    m = inst_map.get(sid)
+    if m:
+        for k, dt in enumerate(cal):
+            v = m.get(dt)
+            if v and (v[0] > 0 or v[1] > 0):
+                buy[k] = 1.0
+    streak = np.zeros(n)
+    run = 0.0
+    for k in range(n):
+        run = run + 1 if buy[k] else 0.0
+        streak[k] = run
+    return buy, streak
+
+
 def build_panel(data, revenue=None, inst=None, rebalance=21, warmup=252,
                 holds=(10, 20, 40, 60), is_end=None):
     """
     回 panel dict(全部 numpy 陣列,每列 = 一個(股票, 再平衡日)):
-      date_i   該列的再平衡日在 cal 的 index
-      feat     {名稱: 陣列}  point-in-time 特徵
-      fwd      {h: 前向報酬}
-      ew       {h: 該列日期的全市場等權前向報酬}
-      dates    每列的日期字串
+      sid/dates/date_i/date_code   身分與日期(date_code = 整數化日期,評估用)
+      feat   {名稱: 陣列}  point-in-time 特徵(見 _stock_features + 營收/法人)
+      fwd    {h: 前向報酬}      ew {h: 該列日期的全市場等權前向報酬}
     is_end:只收 date < is_end 的列(樣本內)。None=全收。
+
+    注意:特徵一律只用「當日與過去」;前向報酬用 i → i+h,不會偷看。
     """
-    cal, C = data.cal, data.C
-    bench = data.bench
+    cal, bench = data.cal, data.bench
+    cal_idx = {dt: i for i, dt in enumerate(cal)}
+    n = len(cal)
     maxh = max(holds)
 
-    # 每檔對齊主日曆的收盤(缺值 None)
-    px = {}
-    for sid in data.d:
-        if sid == bench:
-            continue
-        cs = C[sid]
-        px[sid] = [cs.get(dt) for dt in cal]
+    reb = [i for i in range(warmup, n - maxh, rebalance)]
+    if is_end:
+        reb = [i for i in reb if cal[i] < is_end]
+    reb = np.array(reb, dtype=int)
+    reb_dates = np.array([cal[i] for i in reb])
 
-    # 營收 YoY:每檔 (avail_date, yoy) 排序序列,查詢時 bisect 取最新一筆 <= date
-    yoy_seq = {}
+    EW = {h: data.build_ew(h) for h in holds}
+    ew_at = {h: np.array([EW[h].get(cal[i], np.nan) for i in reb]) for h in holds}
+
+    # 營收:每檔 (avail_date, yoy, accel) 排序序列
+    rev_seq = {}
     if revenue:
         for sid, rows in revenue.items():
             by_ym = {r[1]: r[2] for r in rows if r[2]}
-            seq = []
-            for avail, ym, r in sorted(rows, key=lambda x: x[0]):
+            avails, yoys, accels = [], [], []
+            hist = {}
+            for avail, ym, r in sorted(rows, key=lambda x: x[1]):
                 if not r:
                     continue
                 prev = by_ym.get(ym - 100)
-                if prev and prev > 0:
-                    seq.append((avail, r / prev - 1))
-            if seq:
-                yoy_seq[sid] = ([a for a, _ in seq], [v for _, v in seq])
+                if not prev or prev <= 0:
+                    continue
+                y = r / prev - 1
+                hist[ym] = y
+                p3 = [hist[ym - 100 * k] for k in (1, 2, 3) if (ym - 100 * k) in hist]
+                a = (y - statistics.mean(p3)) if len(p3) == 3 else np.nan
+                avails.append(avail); yoys.append(y); accels.append(a)
+            if avails:
+                o = np.argsort(np.array(avails))
+                rev_seq[sid] = (np.array(avails)[o], np.array(yoys)[o], np.array(accels)[o])
 
-    reb = [i for i in range(warmup, len(cal) - maxh, rebalance)]
-    if is_end:
-        reb = [i for i in reb if cal[i] < is_end]
+    # 規模分位
+    vols_sorted = sorted(data.avgvol.values())
 
-    EW = {h: data.build_ew(h) for h in holds}
+    feat_names = None
+    SIDS, FEATS, DATES, DIDX = [], [], [], []
+    FWD = {h: [] for h in holds}
 
-    rows_date_i, rows_dates, rows_sid = [], [], []
-    F = {k: [] for k in ("mom20", "mom60", "mom120", "mom252",
-                         "px_ma20", "px_ma60", "px_ma120", "vol60", "yoy",
-                         "inst", "volrank", "regime")}
-    FW = {h: [] for h in holds}
-    EWv = {h: [] for h in holds}
+    for sid, bars in data.d.items():
+        if sid == bench:
+            continue
+        close = _aligned(bars, cal_idx, n, "close")
+        p_reb = close[reb]
+        base_ok = np.isfinite(p_reb) & (p_reb > 0)
+        if base_ok.sum() == 0:
+            continue
+        high = _aligned(bars, cal_idx, n, "max")
+        low = _aligned(bars, cal_idx, n, "min")
+        volu = _aligned(bars, cal_idx, n, "volume")
 
-    # 規模分位(全期平均量的百分位)
-    vols = sorted(data.avgvol.values())
-    def volrank(sid):
-        v = data.avgvol.get(sid, 0)
-        return bisect.bisect_left(vols, v) / max(1, len(vols))
-    vr = {sid: volrank(sid) for sid in px}
+        f = _stock_features(close, high, low, volu)
+        row = {k: v[reb] for k, v in f.items()}
 
-    for i in reb:
-        dt = cal[i]
-        reg = data.regime.get(dt)
-        reg_v = 1.0 if reg is True else (0.0 if reg is False else np.nan)
-        for sid, p in px.items():
-            p0 = p[i]
-            if not p0 or p0 <= 0:
-                continue
-            # 前向報酬(所有 hold 都要有)
-            fwds = {}
-            ok = True
-            for h in holds:
-                p1 = p[i + h] if i + h < len(p) else None
-                if not p1 or p1 <= 0 or dt not in EW[h]:
-                    ok = False
-                    break
-                fwds[h] = p1 / p0 - 1
-            if not ok:
-                continue
-            # 動能(point-in-time:只用 i 以前)
-            def mom(lb):
-                q = p[i - lb] if i - lb >= 0 else None
-                return (p0 / q - 1) if q and q > 0 else np.nan
-            # 移動均(窗內有值的平均)
-            def ma_ratio(n):
-                w = [x for x in p[i - n + 1:i + 1] if x and x > 0]
-                return (p0 / (sum(w) / len(w))) if len(w) >= n * 0.8 else np.nan
-            w60 = [x for x in p[i - 59:i + 1] if x and x > 0]
-            if len(w60) >= 48:
-                rets = [w60[j] / w60[j - 1] - 1 for j in range(1, len(w60))]
-                v60 = statistics.pstdev(rets) if len(rets) > 1 else np.nan
-            else:
-                v60 = np.nan
-            # 營收 YoY(最新一筆 avail <= dt)
-            y = np.nan
-            s = yoy_seq.get(sid)
-            if s:
-                k = bisect.bisect_right(s[0], dt) - 1
-                if k >= 0:
-                    y = s[1][k]
-            # 法人:前一交易日投信或外資淨買
-            ib = 0.0
-            if inst and i > 0:
-                v = inst.get(sid, {}).get(cal[i - 1])
-                ib = 1.0 if (v and (v[0] > 0 or v[1] > 0)) else 0.0
+        # 規模分位(全期平均量的百分位,常數)
+        vr = bisect.bisect_left(vols_sorted, data.avgvol.get(sid, 0)) / max(1, len(vols_sorted))
+        row["volrank"] = np.full(len(reb), vr)
 
-            rows_date_i.append(i)
-            rows_dates.append(dt)
-            rows_sid.append(sid)
-            F["mom20"].append(mom(20)); F["mom60"].append(mom(60))
-            F["mom120"].append(mom(120)); F["mom252"].append(mom(252))
-            F["px_ma20"].append(ma_ratio(20)); F["px_ma60"].append(ma_ratio(60))
-            F["px_ma120"].append(ma_ratio(120))
-            F["vol60"].append(v60); F["yoy"].append(y)
-            F["inst"].append(ib); F["volrank"].append(vr[sid]); F["regime"].append(reg_v)
-            for h in holds:
-                FW[h].append(fwds[h])
-                EWv[h].append(EW[h][dt])
+        # regime(依日期)
+        row["regime"] = np.array([1.0 if data.regime.get(cal[i]) is True
+                                  else (0.0 if data.regime.get(cal[i]) is False else np.nan)
+                                  for i in reb])
+
+        # 營收 YoY / 加速度(最新一筆 avail <= 該日)
+        y_arr = np.full(len(reb), np.nan)
+        a_arr = np.full(len(reb), np.nan)
+        s = rev_seq.get(sid)
+        if s is not None:
+            pos = np.searchsorted(s[0], reb_dates, side="right") - 1
+            ok = pos >= 0
+            y_arr[ok] = s[1][pos[ok]]
+            a_arr[ok] = s[2][pos[ok]]
+        row["yoy"] = y_arr
+        row["yoy_accel"] = a_arr
+
+        # 法人(用前一交易日的資料,避免偷看當日盤後)
+        if inst:
+            buy, streak = _inst_series(inst, cal, sid)
+            prev = np.clip(reb - 1, 0, n - 1)
+            row["inst"] = buy[prev]
+            row["inst_streak"] = streak[prev]
+        else:
+            row["inst"] = np.zeros(len(reb))
+            row["inst_streak"] = np.zeros(len(reb))
+
+        # 前向報酬
+        fw = {}
+        ok_all = base_ok.copy()
+        for h in holds:
+            nxt = close[np.clip(reb + h, 0, n - 1)]
+            r = nxt / p_reb - 1
+            good = np.isfinite(r) & np.isfinite(ew_at[h]) & (reb + h < n)
+            fw[h] = np.where(good, r, np.nan)
+            ok_all &= good
+
+        if ok_all.sum() == 0:
+            continue
+        if feat_names is None:
+            feat_names = sorted(row.keys())
+        m = ok_all
+        SIDS.append(np.full(int(m.sum()), sid))
+        FEATS.append(np.column_stack([row[k][m] for k in feat_names]))
+        for h in holds:
+            FWD[h].append(fw[h][m])
+        DATES.append(reb_dates[m])
+        DIDX.append(reb[m])
+
+    if not FEATS:
+        raise SystemExit("面板為空。")
+
+    F = np.vstack(FEATS)
+    feat = {name: F[:, j] for j, name in enumerate(feat_names)}
+    dates = np.concatenate(DATES)
+    date_i = np.concatenate(DIDX)
+    sid_arr = np.concatenate(SIDS)
+
+    uniq_dates, date_code = np.unique(dates, return_inverse=True)
+    ew_by_code = {h: np.array([EW[h].get(d, np.nan) for d in uniq_dates]) for h in holds}
 
     return {
-        "date_i": np.array(rows_date_i),
-        "dates": np.array(rows_dates),
-        "sid": np.array(rows_sid),
-        "feat": {k: np.array(v, dtype=float) for k, v in F.items()},
-        "fwd": {h: np.array(v, dtype=float) for h, v in FW.items()},
-        "ew": {h: np.array(v, dtype=float) for h, v in EWv.items()},
+        "sid": sid_arr,
+        "dates": dates,
+        "date_i": date_i,
+        "date_code": date_code,
+        "n_uniq_dates": len(uniq_dates),
+        "feat": feat,
+        "fwd": {h: np.concatenate(FWD[h]) for h in holds},
+        "ew": {h: ew_by_code[h][date_code] for h in holds},
         "holds": list(holds),
         "n_dates": len(reb),
     }
 
 
 # ============ 條件字典(每維幾個互斥選項,含「不管」)============
-def build_predicates(panel):
-    """回 {維度: [(標籤, 布林遮罩 or None=不管), ...]}。"""
+def build_predicates(panel, wide=True):
+    """
+    回 {維度: [(標籤, 布林遮罩 or None=不管), ...]}。
+    wide=False → 只用原本 7 個核心維度(舊行為)。
+    """
     f = panel["feat"]
-    med_vol = np.nanmedian(f["vol60"])
-    return {
+
+    def q(name, p):
+        return np.nanquantile(f[name], p)
+
+    med_vol = q("vol60", 0.5)
+    core = {
         "size": [("不管", None),
                  ("大型(量前50%)", f["volrank"] >= 0.5),
                  ("中小(量後50%)", f["volrank"] < 0.5)],
@@ -172,16 +272,41 @@ def build_predicates(panel):
                   ("站上MA120", f["px_ma120"] > 1.0)],
         "mom": [("不管", None),
                 ("60日動能>0", f["mom60"] > 0),
-                ("252日動能>0", f["mom252"] > 0)],
+                ("252日動能>0", f["mom252"] > 0),
+                ("20日回檔<0", f["mom20"] < 0)],
         "vol": [("不管", None),
                 ("低波(<中位)", f["vol60"] < med_vol),
                 ("高波(>=中位)", f["vol60"] >= med_vol)],
         "rev": [("不管", None),
                 ("營收YoY>0", f["yoy"] > 0),
-                ("營收YoY>20%", f["yoy"] > 0.2)],
+                ("營收YoY>20%", f["yoy"] > 0.2),
+                ("營收加速>0", f["yoy_accel"] > 0)],
         "inst": [("不管", None),
-                 ("法人淨買", f["inst"] == 1.0)],
+                 ("法人淨買", f["inst"] == 1.0),
+                 ("法人連買>=3日", f["inst_streak"] >= 3)],
     }
+    if not wide:
+        return core
+
+    core.update({
+        "kd": [("不管", None),
+               ("KD超賣(K<20)", f["kd_k"] < 20),
+               ("KD超買(K>80)", f["kd_k"] > 80),
+               ("KD黃金交叉", f["kd_gold"] == 1.0)],
+        "rsi": [("不管", None),
+                ("RSI<30(超賣)", f["rsi14"] < 30),
+                ("RSI>70(超買)", f["rsi14"] > 70)],
+        "volume": [("不管", None),
+                   ("量增(5/60>1.5)", f["volratio"] > 1.5),
+                   ("量縮(5/60<0.7)", f["volratio"] < 0.7)],
+        "pos52": [("不管", None),
+                  ("逼近52週高(>90%)", f["pos52"] > 0.9),
+                  ("逼近52週低(<20%)", f["pos52"] < 0.2)],
+        "bias": [("不管", None),
+                 ("乖離MA20>5%", f["px_ma20"] > 1.05),
+                 ("乖離MA20<-5%", f["px_ma20"] < 0.95)],
+    })
+    return core
 
 
 # ============ 單組評估 ============
@@ -199,33 +324,57 @@ def evaluate(panel, mask, h, fwd=None, cost=config.COST, min_n=100, min_dates=10
         return None
     fw = (panel["fwd"][h] if fwd is None else fwd)[idx]
     ex = (fw - cost) - panel["ew"][h][idx]
-    ex = ex[~np.isnan(ex)]
+    ok = ~np.isnan(ex)
+    ex = ex[ok]
     if len(ex) < min_n:
         return None
-    nd = len(np.unique(panel["dates"][idx]))
+    # 用整數 date_code 數日期(比對字串 np.unique 快很多,掃描時是熱點)
+    nd = int(np.bincount(panel["date_code"][idx][ok],
+                         minlength=panel["n_uniq_dates"]).astype(bool).sum())
     if nd < min_dates:
         return None
     return float(ex.mean() * 20.0 / h), int(len(ex)), float((ex > 0).mean() * 100), nd
 
 
 # ============ 全網格掃描 ============
-def scan(panel, preds, cost=config.COST, min_n=100, fwd_override=None):
+def iter_combos(preds, max_active=4):
     """
-    掃所有組合 × 所有 hold。回 list[dict],按 score 由大到小。
-    fwd_override:{h: 打亂後的前向報酬} — 置換檢定用。
+    產生所有「最多 max_active 個生效條件」的組合。
+    限制條件數不只是為了控制搜尋空間,也直接降低過擬合
+    (條件越多越容易在樣本內雕出漂亮曲線)。
+    回 [(labels dict, [遮罩...]), ...]。
     """
     import itertools
     dims = list(preds.keys())
+    active = {d: [(lab, m) for lab, m in preds[d] if m is not None] for d in dims}
     out = []
-    for choice in itertools.product(*[preds[d] for d in dims]):
-        masks = [m for _, m in choice if m is not None]
+    for k in range(0, max_active + 1):
+        for chosen_dims in itertools.combinations(dims, k):
+            for opts in itertools.product(*[active[d] for d in chosen_dims]):
+                labels = {d: "不管" for d in dims}
+                masks = []
+                for d, (lab, m) in zip(chosen_dims, opts):
+                    labels[d] = lab
+                    masks.append(m)
+                out.append((labels, masks))
+    return out
+
+
+def scan(panel, preds, cost=config.COST, min_n=100, fwd_override=None,
+         max_active=4, combos=None):
+    """
+    掃組合 × 所有 hold。回 list[dict],按 score 由大到小。
+    fwd_override:{h: 打亂後的前向報酬} — 置換檢定用。
+    combos:預先產生的組合(置換時重用,省時)。
+    """
+    out = []
+    for labels, masks in (combos or iter_combos(preds, max_active)):
         if masks:
             mask = np.logical_and.reduce(masks)
             if mask.sum() < min_n:
                 continue
         else:
             mask = None
-        labels = {d: lab for d, (lab, _) in zip(dims, choice)}
         for h in panel["holds"]:
             fw = fwd_override[h] if fwd_override else None
             r = evaluate(panel, mask, h, fwd=fw, cost=cost, min_n=min_n)
@@ -258,15 +407,16 @@ def permute_fwd(panel, rng=RNG):
 
 
 def best_of_n_test(panel, preds, real_best, trials=30, cost=config.COST,
-                   min_n=100, verbose=True):
+                   min_n=100, verbose=True, max_active=4, combos=None):
     """
     跑 trials 次「打亂後的完整搜尋」,收集每次的最佳 score。
     回 (p_value, null_bests)。p = 亂掃最佳 >= 真實最佳 的比例。
     """
+    combos = combos or iter_combos(preds, max_active)
     nulls = []
     for t in range(trials):
         fwd = permute_fwd(panel)
-        res = scan(panel, preds, cost=cost, min_n=min_n, fwd_override=fwd)
+        res = scan(panel, preds, cost=cost, min_n=min_n, fwd_override=fwd, combos=combos)
         b = res[0]["score"] if res else -9
         nulls.append(b)
         if verbose:
@@ -362,7 +512,8 @@ def concentration(panel, mask, h, ex=None, cost=config.COST):
     drop3 = float(np.average(dvals[keep], weights=dw[keep])) if keep.sum() else float("nan")
 
     so = np.argsort(-scontrib)
-    tot = scontrib.sum()
+    # 分母用「所有正貢獻總和」= 總獲利。用淨額當分母會被負貢獻抵銷成 >100%,讀不懂。
+    tot = scontrib[scontrib > 0].sum()
     return {
         "n_rows": len(idx), "n_stocks": len(uniq_s), "n_dates": len(uniq_d),
         "mean": float(vv.mean()), "norm20": float(vv.mean() * 20.0 / h),
@@ -386,7 +537,7 @@ def report_concentration(c, indent="  "):
     print(f"{indent}日期層面:正 {c['date_pos']:.0f}%  中位 {c['date_median']*100:+.2f}%"
           f"   拿掉最好3天 → {c['drop_top3_norm20']*100:+.2f}%/20日")
     print(f"{indent}股票層面:正 {c['stock_pos']:.0f}%  中位 {c['stock_median']*100:+.2f}%")
-    print(f"{indent}貢獻集中:前5檔佔 {c['top5_share']:.0f}%、前10檔佔 {c['top10_share']:.0f}%")
+    print(f"{indent}貢獻集中:前5檔佔總獲利 {c['top5_share']:.0f}%、前10檔佔 {c['top10_share']:.0f}%")
     print(f"{indent}  最大貢獻:{', '.join(s for s, _ in c['top_contrib'][:6])}")
 
     bad = []
