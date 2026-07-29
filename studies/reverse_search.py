@@ -35,6 +35,8 @@ ap.add_argument("--trials", type=int, default=30, help="置換檢定次數")
 ap.add_argument("--is-end", default=config.OOS2_FROM, help="樣本內結束日(此日起鎖住)")
 ap.add_argument("--no-inst", action="store_true", help="不載入法人資料")
 ap.add_argument("--top", type=int, default=15)
+ap.add_argument("--max-active", type=int, default=4, help="一組最多幾個生效條件")
+ap.add_argument("--narrow", action="store_true", help="只用原本 7 個核心維度")
 args = ap.parse_args()
 
 print("=" * 76)
@@ -55,15 +57,14 @@ panel = S.build_panel(data, revenue=rev, inst=inst, is_end=args.is_end)
 print(f"  面板 {len(panel['dates'])} 列  再平衡日 {panel['n_dates']} 個  "
       f"持有期 {panel['holds']}")
 
-preds = S.build_predicates(panel)
-n_combo = 1
-for v in preds.values():
-    n_combo *= len(v)
-print(f"  搜尋空間:{n_combo} 組條件 × {len(panel['holds'])} 種持有期 = "
-      f"{n_combo*len(panel['holds'])} 次評估")
+preds = S.build_predicates(panel, wide=not args.narrow)
+combos = S.iter_combos(preds, args.max_active)
+print(f"  維度 {len(preds)} 個:{', '.join(preds.keys())}")
+print(f"  搜尋空間:{len(combos)} 組條件(最多 {args.max_active} 個生效)× "
+      f"{len(panel['holds'])} 種持有期 = {len(combos)*len(panel['holds'])} 次評估")
 
 print("\n掃描中…")
-res = S.scan(panel, preds)
+res = S.scan(panel, preds, combos=combos)
 if not res:
     raise SystemExit("無有效組合(樣本不足)。")
 print(f"  通過樣本門檻(n>=100、日數>=10)的組合:{len(res)}")
@@ -82,7 +83,7 @@ print("\n" + "=" * 76)
 print(f"第六關:Best-of-N 置換檢定({args.trials} 次)")
 print("  問的不是「這組好不好」,是「亂掃也能掃到這麼好嗎」")
 print("=" * 76)
-p, nulls = S.best_of_n_test(panel, preds, best["score"], trials=args.trials)
+p, nulls = S.best_of_n_test(panel, preds, best["score"], trials=args.trials, combos=combos)
 
 print(f"\n  真實最佳      : {best['score']*100:+.2f}%   {S.describe(best)}")
 print(f"  亂掃最佳(中位): {np.median(nulls)*100:+.2f}%   "
@@ -97,11 +98,25 @@ print("\n" + "=" * 76)
 print("第七關:基準假象 + 集中度/聚類")
 print("  置換檢定擋不住『同一批股票重複中選』(一次產業押注會被判成真訊號)")
 print("=" * 76)
-best_mask = np.logical_and.reduce(
-    [m for m in (dict(preds[d])[l] for d, l in best["labels"].items()) if m is not None])
-ex_peer = S.peer_excess(panel, best["hold"])
-print(f"  vs 全市場等權:{best['score']*100:+.2f}%/20日")
-S.report_concentration(S.concentration(panel, best_mask, best["hold"], ex=ex_peer))
+def mask_of(item):
+    ms = [m for m in (dict(preds[d])[l] for d, l in item["labels"].items()) if m is not None]
+    return np.logical_and.reduce(ms) if ms else np.ones(len(panel["dates"]), bool)
+
+
+survivors = []
+peer_cache = {}
+for rank, cand in enumerate(res[:5], 1):
+    h = cand["hold"]
+    if h not in peer_cache:
+        peer_cache[h] = S.peer_excess(panel, h)
+    print(f"\n  #{rank} {S.describe(cand)}")
+    print(f"     vs 全市場等權:{cand['score']*100:+.2f}%/20日")
+    ok = S.report_concentration(S.concentration(panel, mask_of(cand), h, ex=peer_cache[h]),
+                                indent="     ")
+    if ok:
+        survivors.append(cand)
+print(f"\n  Top5 通過第七關:{len(survivors)}/5")
+best_mask = mask_of(best)
 
 print("\n— 鄰居穩定度(最佳組每一維單獨換掉;孤峰=擬合)—")
 nb = S.neighbors(panel, preds, best)
