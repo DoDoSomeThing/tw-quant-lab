@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import time
+import argparse
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,7 +20,7 @@ from framework import config
 from framework.finmind import http_get, get_tse_stock_list, get_logger, FINMIND_TOKEN, FINMIND_API
 
 logger = get_logger("backfill_revenue")
-START, END = "2019-01-01", "2026-12-31"   # 2019 起 → 2020 事件也有 YoY 基期
+START, END = "2019-01-01", "2026-12-31"   # 預設 2019 起 → 2020 事件也有 YoY 基期(可用 --start 覆蓋)
 SAVE_EVERY, SLEEP_OK, HOUR_BUFFER = 50, 0.35, 120
 
 
@@ -49,7 +50,14 @@ def fetch(sid):
 
 
 def main():
-    out = config.REVENUE_PATH
+    global START, END
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--start", default=START)
+    ap.add_argument("--end", default=END)
+    ap.add_argument("--out", default=None)
+    a = ap.parse_args()
+    START, END = a.start, a.end
+    out = a.out or config.REVENUE_PATH
     if not FINMIND_TOKEN:
         logger.error("無 FINMIND_TOKEN。export FINMIND_TOKEN=... 後重跑。")
         return
