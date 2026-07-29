@@ -506,6 +506,17 @@ def concentration(panel, mask, h, ex=None, cost=config.COST):
     svals = np.array([vv[ss == s].mean() for s in uniq_s])
     scontrib = np.array([vv[ss == s].sum() for s in uniq_s])
 
+    # 基準線:同一批日期下「全體股票」的股票層面中位數。
+    # 個股報酬右偏(少數飆股拉高平均),而基準是平均 → 任何一群股票的中位數都會是負的。
+    # 所以中位數必須**相對比較**,不能用「<0 就死」當標準(那會把所有訊號都誤殺)。
+    dmask = np.isin(panel["dates"], np.array(uniq_d))
+    umask = dmask & ~np.isnan(ex)
+    us, uv = panel["sid"][umask], ex[umask]
+    uniq_us = np.unique(us)
+    uni_svals = np.array([uv[us == s].mean() for s in uniq_us]) if len(uniq_us) else np.array([0.0])
+    base_stock_median = float(np.median(uni_svals))
+    base_stock_pos = float((uni_svals > 0).mean() * 100)
+
     order = np.argsort(-dvals)
     keep = np.ones(len(dvals), bool)
     keep[order[:3]] = False
@@ -519,6 +530,8 @@ def concentration(panel, mask, h, ex=None, cost=config.COST):
         "mean": float(vv.mean()), "norm20": float(vv.mean() * 20.0 / h),
         "date_pos": float((dvals > 0).mean() * 100), "date_median": float(np.median(dvals)),
         "stock_pos": float((svals > 0).mean() * 100), "stock_median": float(np.median(svals)),
+        "base_stock_median": base_stock_median, "base_stock_pos": base_stock_pos,
+        "rel_stock_median": float(np.median(svals)) - base_stock_median,
         "top5_share": float(scontrib[so[:5]].sum() / tot * 100) if tot else float("nan"),
         "top10_share": float(scontrib[so[:10]].sum() / tot * 100) if tot else float("nan"),
         "drop_top3": drop3, "drop_top3_norm20": drop3 * 20.0 / h,
@@ -536,13 +549,17 @@ def report_concentration(c, indent="  "):
     print(f"{indent}vs 同規模 peer:{c['norm20']*100:+.2f}%/20日")
     print(f"{indent}日期層面:正 {c['date_pos']:.0f}%  中位 {c['date_median']*100:+.2f}%"
           f"   拿掉最好3天 → {c['drop_top3_norm20']*100:+.2f}%/20日")
-    print(f"{indent}股票層面:正 {c['stock_pos']:.0f}%  中位 {c['stock_median']*100:+.2f}%")
+    print(f"{indent}股票層面:正 {c['stock_pos']:.0f}%  中位 {c['stock_median']*100:+.2f}%"
+          f"   (同期全體基準 正 {c['base_stock_pos']:.0f}% 中位 {c['base_stock_median']*100:+.2f}%"
+          f" → 相對 {c['rel_stock_median']*100:+.2f}%)")
     print(f"{indent}貢獻集中:前5檔佔總獲利 {c['top5_share']:.0f}%、前10檔佔 {c['top10_share']:.0f}%")
     print(f"{indent}  最大貢獻:{', '.join(s for s, _ in c['top_contrib'][:6])}")
 
     bad = []
-    if c["stock_median"] <= 0:
-        bad.append("多數個股其實是負的(中位≤0)")
+    # 注意:個股報酬右偏 → 對「平均」基準,任何一群股票中位數都會是負的。
+    # 因此比的是「相對同期全體」的中位數,不是絕對值。
+    if c["rel_stock_median"] <= 0:
+        bad.append("個股中位數贏不過同期全體(相對≤0)")
     if c["top5_share"] >= 40:
         bad.append(f"前5檔就佔 {c['top5_share']:.0f}% 貢獻")
     if c["drop_top3_norm20"] < c["norm20"] * 0.5:
