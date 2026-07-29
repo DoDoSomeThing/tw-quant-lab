@@ -42,6 +42,7 @@ import numpy as np
 from framework import config
 from framework.data import Data, load_revenue, load_t86
 from framework import search as S
+from framework import calibrate as C
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--effects", type=float, nargs="+",
@@ -52,6 +53,9 @@ ap.add_argument("--pick", type=float, default=0.10, help="每日選股比例")
 ap.add_argument("--hold", type=int, default=20)
 ap.add_argument("--is-end", default=config.OOS2_FROM)
 ap.add_argument("--max-active", type=int, default=3)
+ap.add_argument("--rebalance", type=int, default=21, help="再平衡間隔(交易日);5=週")
+ap.add_argument("--no-inst", action="store_true")
+ap.add_argument("--n-random", type=int, default=100, help="校準用隨機對照組數")
 args = ap.parse_args()
 
 print("=" * 78)
@@ -59,11 +63,13 @@ print("驗證器自我驗證:陽性對照(注入已知 edge,看關卡抓不抓�
 print("=" * 78)
 
 data = Data()
-panel = S.build_panel(data, revenue=load_revenue(), inst=load_t86(), is_end=args.is_end)
+panel = S.build_panel(data, revenue=load_revenue(),
+                      inst=None if args.no_inst else load_t86(),
+                      rebalance=args.rebalance, is_end=args.is_end)
 dates, sid = panel["dates"], panel["sid"]
 H = args.hold
-print(f"面板 {len(dates)} 列  持有 {H} 日  每日選前 {args.pick*100:.0f}%  "
-      f"樣本內 <{args.is_end}")
+print(f"面板 {len(dates)} 列  再平衡 {args.rebalance} 日  持有 {H} 日  "
+      f"每期選前 {args.pick*100:.0f}%  樣本內 <{args.is_end}")
 
 # ---- 無技術含量的選股規則:雜湊(sid+date)→ 偽隨機分數,每日取前 pick% ----
 score = np.array([int(hashlib.md5(f"{s}|{d}".encode()).hexdigest()[:8], 16) % 10**6
@@ -122,10 +128,9 @@ for E in args.effects:
     p6, _ = S.best_of_n_test(panel_h, preds, synth_score, trials=args.trials,
                              combos=combos, verbose=False)
     g6 = p6 <= 0.05
-    c = S.concentration(panel_h, sel, H, ex=ex_peer)
-    # 靜默評估第七關
-    g7 = bool(c and c["rel_stock_median"] > 0 and c["top5_share"] < 40
-              and c["drop_top3_norm20"] >= c["norm20"] * 0.5)
+    # 第七關改用校準版(門檻由同規模隨機選股的實測分布決定,非人訂數字)
+    c = C.calibrate(panel_h, sel, H, ex=ex_peer, n_random=args.n_random)
+    g7 = bool(c and c["passed"])
 
     verdict = "🟢 抓到" if (g6 and g7) else ("🟡 只過第六關" if g6 else "🔴 沒抓到")
     print(f"{E*100:>9.2f}%{measured*100:>15.2f}%{pval:>13.4f}"
@@ -149,7 +154,7 @@ print("\n— 最大注入強度下的第七關細節(看關卡在挑剔什麼)�
 if results:
     E, measured, g6, g7, c = results[-1]
     print(f"  注入 {E*100:.2f}%/20日:")
-    S.report_concentration(c, indent="    ")
+    C.report(c, indent="    ")
 
 print("\n" + "=" * 78)
 print("判讀:若偵測門檻遠低於真實訊號的效果量,代表關卡沒有系統性殺好訊號;")
