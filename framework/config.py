@@ -19,8 +19,19 @@ _DEFAULT_T86 = os.path.join(ROOT, "data", "t86_cache")
 DATA_DIR = os.environ.get("QLAB_DATA_DIR", _DEFAULT_DATA)
 T86_DIR = os.environ.get("QLAB_T86_DIR", _DEFAULT_T86)
 
-# 檔名可用環境變數覆蓋,方便並存多份資料(例:長歷史版 kline_deep_long.json)
-KLINE_FILE = os.environ.get("QLAB_KLINE_FILE", "kline_deep.json")
+# 價格模式:raw=原始價(TaiwanStockPrice)、adj=還原價(kline_deep_adj.json,
+# 由 backfill/build_adj.py 用免費事件資料集自建;TaiwanStockPriceAdj 是贊助會員限定)。
+# 原始價有兩個已知偏差:①分割/減資造成假跳動(污染動能類訊號)②除息假跌 →
+# 高殖利率/存股型訊號的報酬被系統性低估。驗這類訊號請用 adj。
+PRICE_MODE = os.environ.get("QLAB_PRICE", "raw").lower()
+if PRICE_MODE not in ("raw", "adj"):
+    raise SystemExit(f"QLAB_PRICE={PRICE_MODE} 不合法,只接受 raw / adj。")
+PRICE_DATASET = "TaiwanStockPriceAdj" if PRICE_MODE == "adj" else "TaiwanStockPrice"
+
+# 檔名預設跟著價格模式走(raw/adj 兩套並存不互污);要並存更多份資料
+# (例:長歷史版 kline_deep_long.json)再用 QLAB_KLINE_FILE 明確覆蓋。
+_DEFAULT_KLINE = "kline_deep_adj.json" if PRICE_MODE == "adj" else "kline_deep.json"
+KLINE_FILE = os.environ.get("QLAB_KLINE_FILE", _DEFAULT_KLINE)
 REVENUE_FILE = os.environ.get("QLAB_REVENUE_FILE", "revenue.json")
 
 KLINE_PATH = os.path.join(DATA_DIR, KLINE_FILE)
