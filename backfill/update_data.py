@@ -29,6 +29,16 @@ logger = get_logger("update_data")
 KLINE_GRACE_DAYS = 1
 SAVE_EVERY, SLEEP_OK, HOUR_BUFFER = 50, 0.4, 120
 
+# ---- TWSE 全市場逐日(kline 預設來源,免 token 免配額)----
+# 2026-08-07 改:原本 kline 走 FinMind 逐檔,GitHub Actions 上連不到 FinMind 時
+# 每檔要 3×40s timeout + backoff ≈ 138 秒,1087 檔 ≈ 42 小時,而且 st=="fail"
+# 只是 i+=1 繼續 → 無聲磨到 job timeout(實測 run 31139400990 跑 3.4 小時、
+# FinMind 配額用量 0)。TWSE rwd 帶 date 一個請求拿全市場一天,補一個月只要 ~20 個請求。
+TWSE_MI_INDEX = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+TWSE_SLEEP = 3.0          # TWSE 對連打敏感,節流
+TWSE_MAX_FAILS = 5        # 連續失敗上限 → 中止並報錯,不再無聲繼續
+TWSE_MAX_DAYS = 400       # 缺口超過此天數 → 要求改跑全量 backfill,不硬撐
+
 
 # ---------- 日期工具 ----------
 def last_weekday(d):
@@ -113,6 +123,120 @@ def fetch_revenue(sid, start, end):
         avail = (datetime.strptime(x["date"], "%Y-%m-%d") + timedelta(days=11)).strftime("%Y-%m-%d")
         rows.append([avail, ym, float(x["revenue"])])
     return rows, "ok"
+
+
+def _twse_num(s):
+    """'2,390.00' → 2390.0;'--' / '' / None → None。"""
+    if s is None:
+        return None
+    s = str(s).replace(",", "").strip()
+    if s in ("", "-", "--", "---"):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def fetch_market_day(ymd):
+    """
+    TWSE 全市場某一天的 OHLCV。回 {sid: bar};非交易日回 {}。
+    網路失敗 raise(由呼叫端計數中止),不吞掉 —— 吞掉就會變成無聲磨。
+    """
+    r = http_get(TWSE_MI_INDEX, timeout=30,
+                 params={"date": ymd, "type": "ALLBUT0999", "response": "json"},
+                 headers={"User-Agent": "tw-quant-lab/1.0"})
+    j = r.json()
+    if j.get("stat") != "OK":
+        return {}                                  # 非交易日 / 無資料
+    tbl = None
+    for t in j.get("tables", []):
+        if "證券代號" in (t.get("fields") or []) and len(t.get("data") or []) > 100:
+            tbl = t
+            break
+    if tbl is None:
+        return {}
+    d = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
+    out = {}
+    for row in tbl["data"]:
+        sid = str(row[0]).strip()
+        vol = _twse_num(row[2])
+        o, hi, lo, c = (_twse_num(row[5]), _twse_num(row[6]),
+                        _twse_num(row[7]), _twse_num(row[8]))
+        if None in (o, hi, lo, c) or c <= 0:
+            continue                               # 當日無成交 → 跳過,不寫 close=0
+        out[sid] = {"date": d, "open": o, "max": hi, "min": lo,
+                    "close": c, "volume": vol or 0.0}
+    return out
+
+
+def update_kline_twse(deep, path):
+    """
+    走 TWSE 全市場逐日補 kline。只補「現有股票」缺的日子(與 FinMind 版語意相同),
+    但一個請求拿一天全市場,不是一檔一請求。
+    """
+    lasts = [bars[-1]["date"] for bars in deep.values() if bars]
+    if not lasts:
+        logger.error("kline 是空的,請先跑 backfill_kline.py 全量。")
+        return
+    start = (datetime.strptime(min(lasts), "%Y-%m-%d") + timedelta(days=1)).date()
+    end = date.today()
+    days = (end - start).days + 1
+    logger.info(f"[kline/TWSE] 缺口 {start} ~ {end}({days} 天),"
+                f"最舊 {min(lasts)} / 最新 {max(lasts)}")
+    if days > TWSE_MAX_DAYS:
+        logger.error(f"缺口 {days} 天 > {TWSE_MAX_DAYS},別用增量硬補 —— "
+                     f"改跑 backfill_kline.py 全量,或先下載 release 種子。")
+        return
+    if days <= 0:
+        logger.info("[kline/TWSE] 沒有缺口。")
+        return
+
+    have = {c: {b["date"] for b in bars} for c, bars in deep.items()}
+    fails = 0
+    scanned = trading = new_bars = 0
+    d = start
+    while d <= end:
+        if d.weekday() >= 5:                       # 週末直接跳,不浪費請求
+            d += timedelta(days=1)
+            continue
+        try:
+            rows = fetch_market_day(d.strftime("%Y%m%d"))
+            fails = 0
+        except Exception as e:
+            fails += 1
+            logger.warning(f"[kline/TWSE] {d} 抓取失敗({fails}/{TWSE_MAX_FAILS}):{e}")
+            if fails >= TWSE_MAX_FAILS:
+                _save(deep, path)
+                raise SystemExit(
+                    f"連續 {TWSE_MAX_FAILS} 天抓取失敗 → 中止。"
+                    f"已寫入截至目前的資料到 {path}。請檢查對外連線。")
+            time.sleep(TWSE_SLEEP * fails)
+            continue                               # 同一天重試
+        scanned += 1
+        if rows:
+            trading += 1
+            for sid, bar in rows.items():
+                bars = deep.get(sid)
+                if bars is None:                   # 新上市:增量不處理(同 FinMind 版語意)
+                    continue
+                if bar["date"] in have[sid]:
+                    continue
+                bars.append(bar)
+                have[sid].add(bar["date"])
+                new_bars += 1
+        d += timedelta(days=1)
+        time.sleep(TWSE_SLEEP)
+        if scanned % 20 == 0:
+            _save(deep, path)
+            logger.info(f"[kline/TWSE] 已掃 {scanned} 天(交易日 {trading}),"
+                        f"新增 {new_bars} 根")
+
+    for bars in deep.values():
+        bars.sort(key=lambda b: b["date"])
+    _save(deep, path)
+    logger.info(f"[kline/TWSE] 完成:掃 {scanned} 天(交易日 {trading}),"
+                f"新增 {new_bars} 根 → {path}")
 
 
 def _save(obj, path):
@@ -202,6 +326,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="只檢測不抓")
     ap.add_argument("--force", action="store_true", help="不管新舊都增量更新")
+    ap.add_argument("--kline-source", choices=("twse", "finmind"), default="twse",
+                    help="kline 來源。預設 twse(免 token、一請求一天全市場);"
+                         "finmind 是舊路徑,雲端連不上時會無聲磨數十小時")
     args = ap.parse_args()
 
     kp, rp = config.KLINE_PATH, config.REVENUE_PATH
@@ -228,13 +355,22 @@ def main():
     if not (do_k or do_r):
         print("都最新,免更新。")
         return
-    if not FINMIND_TOKEN:
-        logger.error("需更新但無 FINMIND_TOKEN。export FINMIND_TOKEN=... 後重跑。")
-        return
+    # kline 走 TWSE 不需要 token;只有 revenue(FinMind 獨有)才需要。
+    needs_token = do_r or (do_k and args.kline_source == "finmind")
+    if needs_token and not FINMIND_TOKEN:
+        logger.error("需更新但無 FINMIND_TOKEN。export FINMIND_TOKEN=... 後重跑。"
+                     "(kline 走 --kline-source twse 則不需要 token)")
+        if not do_k or args.kline_source == "finmind":
+            return
+        do_r = False
 
     if do_k:
-        logger.info(f"kline 增量更新(落後 {k_behind} 檔 → 補到今天)…")
-        update_kline(deep, kp)
+        logger.info(f"kline 增量更新(落後 {k_behind} 檔 → 補到今天,"
+                    f"來源 {args.kline_source})…")
+        if args.kline_source == "twse":
+            update_kline_twse(deep, kp)
+        else:
+            update_kline(deep, kp)
     if do_r:
         logger.info("revenue 增量更新(補新月份)…")
         update_revenue(rev, rp)
